@@ -135,28 +135,38 @@ fn handleBuiltin(user_input: []const u8, stdout: anytype, allocator: std.mem.All
             // Print the current working directory
             try stdout.print("{s}\n", .{cwd});
         } else if (std.mem.eql(u8, command, "cd")) {
-            const comm = command_split.next();
-            var path: []const u8 = undefined;
+            // Get the next argument after the "cd" command
+            const maybe_args = command_split.next();
+            // Initialize a variable to hold the owned path string
+            var path_owned: ?[]u8 = null;
+            // Ensure the owned path is freed when we're done
+            defer if (path_owned) |p| allocator.free(p);
 
-            if (comm) |args| {
+            // Determine the path to change to
+            const path = if (maybe_args) |args| blk: {
                 if (std.mem.eql(u8, args, "~")) {
-                    path = std.process.getEnvVarOwned(allocator, "HOME") catch {
+                    // If the argument is "~", get the HOME environment variable
+                    path_owned = std.process.getEnvVarOwned(allocator, "HOME") catch {
                         try stdout.print("cd: HOME not set\n", .{});
                         return;
                     };
-                    defer allocator.free(path);
+                    break :blk path_owned.?;
                 } else {
-                    path = args;
+                    // Otherwise, use the provided argument
+                    break :blk args;
                 }
-            } else {
-                path = std.process.getEnvVarOwned(allocator, "HOME") catch {
+            } else blk: {
+                // If no argument is provided, default to HOME
+                path_owned = std.process.getEnvVarOwned(allocator, "HOME") catch {
                     try stdout.print("cd: HOME not set\n", .{});
                     return;
                 };
-                defer allocator.free(path);
-            }
+                break :blk path_owned.?;
+            };
 
+            // Attempt to change the current working directory
             std.process.changeCurDir(path) catch {
+                // If changing directory fails, print an error message
                 try stdout.print("cd: {s}: No such file or directory\n", .{path});
             };
         }
