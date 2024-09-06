@@ -4,7 +4,7 @@ pub fn main() !void {
     const stdout = std.io.getStdOut().writer();
     const stdin = std.io.getStdIn().reader();
     var buffer: [1024]u8 = undefined;
-    const commands = [_][]const u8{ "echo", "type", "exit" };
+    const commands = [_][]const u8{ "echo", "type", "exit", "pwd" };
 
     while (true) {
         try stdout.print("$ ", .{});
@@ -27,6 +27,7 @@ fn handleCommand(user_input: []const u8, commands: []const []const u8, stdout: a
                 switch (command[0]) {
                     'e' => try handleEcho(user_input, stdout),
                     't' => try handleType(user_input, commands, stdout),
+                    'p', 'c' => try handleBuiltin(user_input, stdout),
                     else => {},
                 }
                 return;
@@ -119,4 +120,27 @@ fn findExecutable(command: []const u8) !?[]const u8 {
     }
     // If the executable is not found, return null
     return null;
+}
+
+fn handleBuiltin(user_input: []const u8, stdout: anytype) !void {
+    var command_split = std.mem.splitSequence(u8, user_input, " ");
+    if (command_split.next()) |command| {
+        if (std.mem.eql(u8, command, "pwd")) {
+            const cwd = try std.fs.cwd().realpathAlloc(std.heap.page_allocator, ".");
+            defer std.heap.page_allocator.free(cwd);
+            try stdout.print("{s}\n", .{cwd});
+        } else if (std.mem.eql(u8, command, "cd")) {
+            if (command_split.next()) |dir| {
+                var new_dir = std.fs.cwd().openDir(dir, .{}) catch |err| {
+                    try stdout.print("cd: {s}: {s}\n", .{ dir, @errorName(err) });
+                    return;
+                };
+                defer new_dir.close();
+
+                try stdout.print("Changed to directory: {s}\n", .{dir});
+            } else {
+                try stdout.print("cd: missing argument\n", .{});
+            }
+        }
+    }
 }
