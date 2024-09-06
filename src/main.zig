@@ -32,7 +32,29 @@ fn handleCommand(user_input: []const u8, commands: []const []const u8, stdout: a
                 return;
             }
         }
-        try stdout.print("{s}: command not found\n", .{user_input});
+
+        if (try findExecutable(first_word)) |path| {
+
+            // Create an ArrayList to store command arguments
+            var args = std.ArrayList([]const u8).init(std.heap.page_allocator);
+            defer args.deinit();
+
+            // Add the executable path as the first argument
+            try args.append(path);
+
+            // Iterate through the rest of the command arguments
+            while (command_split.next()) |arg| {
+                try args.append(arg);
+            }
+
+            // Initialize a child process with the arguments
+            var child = std.process.Child.init(args.items, std.heap.page_allocator);
+
+            // Spawn the child process and wait for it to complete
+            _ = try child.spawnAndWait();
+        } else {
+            try stdout.print("{s}: command not found\n", .{user_input});
+        }
     }
 }
 
@@ -56,9 +78,7 @@ fn handleType(user_input: []const u8, commands: []const []const u8, stdout: anyt
                 return;
             }
         }
-        if (std.mem.eql(u8, type_content, "cat")) {
-            try stdout.print("cat is /bin/cat\n", .{});
-        } else if (try findExecutable(type_content)) |path| {
+        if (try findExecutable(type_content)) |path| {
             try stdout.print("{s} is {s}\n", .{ type_content, path });
             std.heap.page_allocator.free(path);
         } else {
