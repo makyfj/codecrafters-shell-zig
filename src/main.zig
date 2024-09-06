@@ -1,10 +1,21 @@
 const std = @import("std");
 
+const Command = enum {
+    echo,
+    type,
+    exit,
+    pwd,
+    cd,
+};
+
 pub fn main() !void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
     const stdout = std.io.getStdOut().writer();
     const stdin = std.io.getStdIn().reader();
     var buffer: [1024]u8 = undefined;
-    const commands = [_][]const u8{ "echo", "type", "exit", "pwd" };
 
     while (true) {
         try stdout.print("$ ", .{});
@@ -14,30 +25,28 @@ pub fn main() !void {
                 std.process.exit(0);
             }
 
-            try handleCommand(user_input, &commands, stdout);
+            try handleCommand(user_input, stdout, allocator);
         }
     }
 }
 
-fn handleCommand(user_input: []const u8, commands: []const []const u8, stdout: anytype) !void {
+fn handleCommand(user_input: []const u8, stdout: anytype, allocator: std.mem.Allocator) !void {
     var command_split = std.mem.splitSequence(u8, user_input, " ");
     if (command_split.next()) |first_word| {
-        for (commands) |command| {
-            if (std.mem.eql(u8, first_word, command)) {
-                switch (command[0]) {
-                    'e' => try handleEcho(user_input, stdout),
-                    't' => try handleType(user_input, commands, stdout),
-                    'p', 'c' => try handleBuiltin(user_input, stdout),
-                    else => {},
-                }
-                return;
+        if (std.meta.stringToEnum(Command, first_word)) |command| {
+            switch (command) {
+                .echo => try handleEcho(user_input, stdout),
+                .type => try handleType(user_input, stdout, allocator),
+                .pwd, .cd => try handleBuiltin(user_input, stdout, allocator),
+                .exit => std.process.exit(0),
             }
+            return;
         }
 
-        if (try findExecutable(first_word)) |path| {
+        if (try findExecutable(first_word, allocator)) |path| {
 
             // Create an ArrayList to store command arguments
-            var args = std.ArrayList([]const u8).init(std.heap.page_allocator);
+            var args = std.ArrayList([]const u8).init(allocator);
             defer args.deinit();
 
             // Add the executable path as the first argument
@@ -49,7 +58,7 @@ fn handleCommand(user_input: []const u8, commands: []const []const u8, stdout: a
             }
 
             // Initialize a child process with the arguments
-            var child = std.process.Child.init(args.items, std.heap.page_allocator);
+            var child = std.process.Child.init(args.items, allocator);
 
             // Spawn the child process and wait for it to complete
             _ = try child.spawnAndWait();
@@ -68,30 +77,23 @@ fn handleEcho(user_input: []const u8, stdout: anytype) !void {
     }
 }
 
-fn handleType(user_input: []const u8, commands: []const []const u8, stdout: anytype) !void {
+fn handleType(user_input: []const u8, stdout: anytype, allocator: std.mem.Allocator) !void {
     const type_content = user_input[5..];
     if (type_content.len == 0) {
         try stdout.print("type: missing argument\n", .{});
     } else {
-        for (commands) |cmd| {
-            if (std.mem.eql(u8, type_content, cmd)) {
-                try stdout.print("{s} is a shell builtin\n", .{type_content});
-                return;
-            }
-        }
-        if (try findExecutable(type_content)) |path| {
+        if (std.meta.stringToEnum(Command, type_content)) |_| {
+            try stdout.print("{s} is a shell builtin\n", .{type_content});
+        } else if (try findExecutable(type_content, allocator)) |path| {
             try stdout.print("{s} is {s}\n", .{ type_content, path });
-            std.heap.page_allocator.free(path);
         } else {
             try stdout.print("{s}: not found\n", .{type_content});
         }
     }
 }
 
-fn findExecutable(command: []const u8) !?[]const u8 {
-    // Use the page allocator for memory allocation
-    const allocator = std.heap.page_allocator;
-    // Get the environment variables map
+fn findExecutable(command: []const u8, allocator: std.mem.Allocator) !?[]const u8 {
+    // Get the environment variables map and use the provided memeory allocator
     var env_map = try std.process.getEnvMap(allocator);
     defer env_map.deinit();
 
@@ -122,25 +124,41 @@ fn findExecutable(command: []const u8) !?[]const u8 {
     return null;
 }
 
-fn handleBuiltin(user_input: []const u8, stdout: anytype) !void {
+fn handleBuiltin(user_input: []const u8, stdout: anytype, allocator: std.mem.Allocator) !void {
     var command_split = std.mem.splitSequence(u8, user_input, " ");
+
+    // Get the first word, which should be the command
     if (command_split.next()) |command| {
         if (std.mem.eql(u8, command, "pwd")) {
-            const cwd = try std.fs.cwd().realpathAlloc(std.heap.page_allocator, ".");
-            defer std.heap.page_allocator.free(cwd);
+            const cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
+            defer allocator.free(cwd);
+            // Print the current working directory
             try stdout.print("{s}\n", .{cwd});
         } else if (std.mem.eql(u8, command, "cd")) {
-            if (command_split.next()) |dir| {
-                var new_dir = std.fs.cwd().openDir(dir, .{}) catch |err| {
-                    try stdout.print("cd: {s}: {s}\n", .{ dir, @errorName(err) });
+            const comm = command_split.next();
+            var path: []const u8 = undefined;
+
+            if (comm) |args| {
+                if (std.mem.eql(u8, args, "~")) {
+                    path = std.process.getEnvVarOwned(allocator, "HOME") catch {
+                        try stdout.print("cd: HOME not set\n", .{});
+                        return;
+                    };
+                    defer allocator.free(path);
+                } else {
+                    path = args;
+                }
+            } else {
+                path = std.process.getEnvVarOwned(allocator, "HOME") catch {
+                    try stdout.print("cd: HOME not set\n", .{});
                     return;
                 };
-                defer new_dir.close();
-
-                try stdout.print("Changed to directory: {s}\n", .{dir});
-            } else {
-                try stdout.print("cd: missing argument\n", .{});
+                defer allocator.free(path);
             }
+
+            std.process.changeCurDir(path) catch {
+                try stdout.print("cd: {s}: No such file or directory\n", .{path});
+            };
         }
     }
 }
